@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import { NOTE_OPTIONS, noteFreq, noteLabel, fmt, buildSVG } from "./lib/geometry";
-import { presetJusta, presetPenta, presetCromatica } from "./lib/presets";
+import { NOTE_NAMES, NOTE_ES, NOTE_OPTIONS, noteFreq, noteLabel, fmt, buildSVG, buildPrintableSVG, printableSize, findRpmCandidates } from "./lib/geometry";
+import { presetDoMayor, presetJusta, presetPenta, presetCromatica } from "./lib/presets";
+import { SCALES, generateScale } from "./lib/scales";
 
 /* ================= materiales ================= */
 const MATERIALS = {
@@ -19,7 +20,7 @@ const STROKE_COLORS = [
 /* ================= persistencia ================= */
 const STORAGE_KEY = "tonewheel-config-v1";
 const defaultDisc = { D: 150, centerHole: 5, mountN: 3, mountDia: 3, mountR: 12, outerMargin: 5, ringGap: 2, innerMin: 22, autoLayout: true };
-const defaultG = { rpm: 654, a4: 440, material: "mdf3", output: "laser", stroke: "#000000", labels: true, minArc: 1.5, spin: false, preset: "DoMayorJusta" };
+const defaultG = { rpm: 654, a4: 440, material: "mdf3", output: "laser", stroke: "#000000", labels: true, minArc: 1.5, spin: false, preset: "DoMayor" };
 function loadSaved() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -35,9 +36,27 @@ function loadSaved() {
 /* ================= componente ================= */
 export default function App() {
   const [disc, setDisc] = useState(() => loadSaved()?.disc ?? defaultDisc);
-  const [rings, setRings] = useState(() => loadSaved()?.rings ?? presetJusta());
+  const [rings, setRings] = useState(() => loadSaved()?.rings ?? presetDoMayor());
   const [g, setG] = useState(() => loadSaved()?.g ?? defaultG);
   const fileRef = useRef(null);
+  const [rpmCandidates, setRpmCandidates] = useState(null);
+
+  const searchRpm = () => setRpmCandidates(findRpmCandidates({ rings, a4: g.a4 }));
+  const useRpmCandidate = (rpm) => {
+    setG({ ...g, rpm });
+    setRpmCandidates(null);
+  };
+
+  const [bulkDuty, setBulkDuty] = useState(false);
+  const setAllDuty = (v) => setRings(rings.map((r) => ({ ...r, duty: v })));
+
+  const [scaleRoot, setScaleRoot] = useState("C");
+  const [scaleType, setScaleType] = useState("mayor");
+  const [scaleOctave, setScaleOctave] = useState(4);
+  const applyScale = () => {
+    setRings(generateScale(scaleRoot, scaleOctave, scaleType));
+    setG({ ...g, preset: `${scaleType}_${scaleRoot}${scaleOctave}` });
+  };
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ disc, rings, g }));
@@ -47,7 +66,7 @@ export default function App() {
     if (!window.confirm("¿Restablecer todos los valores a la configuración de fábrica? Se perderán los cambios actuales.")) return;
     localStorage.removeItem(STORAGE_KEY);
     setDisc(defaultDisc);
-    setRings(presetJusta());
+    setRings(presetDoMayor());
     setG(defaultG);
   };
 
@@ -98,6 +117,10 @@ export default function App() {
     () => buildSVG({ disc, rows, output: g.output, stroke: g.stroke, labels: false }),
     [disc, rows, g.output, g.stroke, g.rpm]
   );
+  const svgPrintable = useMemo(
+    () => buildPrintableSVG({ disc, rows, output: g.output, stroke: g.stroke, labels: false }),
+    [disc, rows, g.output, g.stroke, g.rpm]
+  );
 
   /* ---- exportación ---- */
   const dutyLabel = rings.every((r) => r.duty === rings[0]?.duty) ? `duty${rings[0]?.duty ?? 50}` : "dutyMix";
@@ -113,25 +136,28 @@ export default function App() {
   const dlSVG = () => download(new Blob([svgExport], { type: "image/svg+xml" }), `${baseName}.svg`);
   const dlJSON = () => download(new Blob([JSON.stringify({ disc, rings, g }, null, 2)], { type: "application/json" }), `${baseName}.json`);
   const dlPNG = () => {
-    const px = Math.round((disc.D / 25.4) * 300);
+    const { W, H } = printableSize(disc.D);
+    const pxW = Math.round((W / 25.4) * 300);
+    const pxH = Math.round((H / 25.4) * 300);
     const img = new Image();
-    const url = URL.createObjectURL(new Blob([svgExport], { type: "image/svg+xml" }));
+    const url = URL.createObjectURL(new Blob([svgPrintable], { type: "image/svg+xml" }));
     img.onload = () => {
       const cv = document.createElement("canvas");
-      cv.width = px; cv.height = px;
+      cv.width = pxW; cv.height = pxH;
       const ctx = cv.getContext("2d");
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, px, px);
-      ctx.drawImage(img, 0, 0, px, px);
+      ctx.fillRect(0, 0, pxW, pxH);
+      ctx.drawImage(img, 0, 0, pxW, pxH);
       cv.toBlob((b) => download(b, `${baseName}_300dpi.png`), "image/png");
       URL.revokeObjectURL(url);
     };
     img.src = url;
   };
   const dlPDF = () => {
+    const { W, H } = printableSize(disc.D);
     const w = window.open("", "_blank");
     if (!w) { alert("Permite ventanas emergentes para generar el PDF."); return; }
-    w.document.write(`<!doctype html><html><head><title>${baseName}</title><style>@page{size:${disc.D + 20}mm ${disc.D + 20}mm;margin:10mm}body{margin:0}</style></head><body>${svgExport}<scr` + `ipt>window.onload=()=>setTimeout(()=>window.print(),300)</scr` + `ipt></body></html>`);
+    w.document.write(`<!doctype html><html><head><title>${baseName}</title><style>@page{size:${W + 20}mm ${H + 20}mm;margin:10mm}body{margin:0}</style></head><body>${svgPrintable}<scr` + `ipt>window.onload=()=>setTimeout(()=>window.print(),300)</scr` + `ipt></body></html>`);
     w.document.close();
   };
   const importJSON = (e) => {
@@ -155,6 +181,7 @@ export default function App() {
   const addRing = () => setRings([...rings, { id: Date.now(), mode: "note", note: "C4", N: 48, duty: 50, shape: "arc" }]);
   const delRing = (id) => setRings(rings.filter((r) => r.id !== id));
   const applyPreset = (name) => {
+    if (name === "DoMayor") setRings(presetDoMayor());
     if (name === "DoMayorJusta") setRings(presetJusta(g.rpm));
     if (name === "Pentatonica") setRings(presetPenta());
     if (name === "Cromatica12") setRings(presetCromatica());
@@ -175,7 +202,7 @@ export default function App() {
         h1{font-size:20px;margin:0;font-weight:800;letter-spacing:.02em}
         h1 span{color:var(--amber)}
         .sub{color:var(--dim);font-size:12.5px}
-        .grid{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px}
+        .grid{display:grid;grid-template-columns:minmax(330px,418px) 1fr;gap:14px}
         @media(max-width:860px){.grid{grid-template-columns:1fr}}
         .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
         .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--amber);margin:0 0 10px}
@@ -185,6 +212,7 @@ export default function App() {
         input,select,button{font-family:inherit;font-size:13px}
         input[type=number],select{width:100%;background:#10131a;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:6px 8px}
         input[type=range]{width:100%;accent-color:var(--amber)}
+        input[type=range]:disabled{opacity:.4;cursor:not-allowed}
         .mono{font-family:'JetBrains Mono',monospace}
         button{background:#242b38;border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:7px 11px;cursor:pointer}
         button:hover{border-color:var(--amber)}
@@ -281,8 +309,34 @@ export default function App() {
               <div><label>A4 de referencia (Hz)</label><input type="number" step="0.1" value={g.a4} onChange={(e) => setG({ ...g, a4: num(e.target.value) })} /></div>
               <div><label>Abertura mínima (mm de arco)</label><input type="number" step="0.1" value={g.minArc} onChange={(e) => setG({ ...g, minArc: num(e.target.value) })} /></div>
             </div>
+            <button className="small" onClick={() => (rpmCandidates ? setRpmCandidates(null) : searchRpm())}>
+              {rpmCandidates ? "Ocultar candidatos de rpm" : "Buscar mejor rpm (menor error en cents)"}
+            </button>
+            {rpmCandidates && (
+              rpmCandidates.length === 0 ? (
+                <div className="tip">Ningún anillo está en modo "Nota musical" — no hay nada que optimizar. (El modo "N manual" no depende del rpm para su afinación.) <button className="small" onClick={() => setRpmCandidates(null)}>Cerrar</button></div>
+              ) : (
+                <div className="tablewrap" style={{ marginTop: 8 }}>
+                  <table className="mono">
+                    <thead><tr><th>rpm</th><th>Error máx (cents)</th><th>Error prom (cents)</th><th></th></tr></thead>
+                    <tbody>
+                      {rpmCandidates.map((c) => (
+                        <tr key={c.rpm} className={c.rpm === g.rpm ? "" : undefined}>
+                          <td>{c.rpm}</td>
+                          <td className={Math.abs(c.maxErr) < 5 ? "cents-ok" : "cents-bad"}>{fmt(c.maxErr, 1)}</td>
+                          <td>{fmt(c.avgErr, 1)}</td>
+                          <td><button className="small" onClick={() => useRpmCandidate(c.rpm)}>Usar</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <button className="small" style={{ marginTop: 6 }} onClick={() => setRpmCandidates(null)}>Cerrar sin cambiar el rpm</button>
+                </div>
+              )
+            )}
             <label>Presets de escala</label>
             <div className="exports" style={{ marginTop: 4 }}>
+              <button className="small" onClick={() => applyPreset("DoMayor")}>Do mayor</button>
               <button className="small" onClick={() => applyPreset("DoMayorJusta")}>Do mayor justa</button>
               <button className="small" onClick={() => applyPreset("Pentatonica")}>Pentatónica</button>
               <button className="small" onClick={() => applyPreset("Cromatica12")}>Cromática 12-TET</button>
@@ -290,7 +344,40 @@ export default function App() {
           </div>
 
           <div className="panel">
+            <h2>Selector de escala</h2>
+            <div className="row">
+              <div>
+                <label>Tónica</label>
+                <select value={scaleRoot} onChange={(e) => setScaleRoot(e.target.value)}>
+                  {NOTE_NAMES.map((n) => <option key={n} value={n}>{NOTE_ES[n]}</option>)}
+                </select>
+              </div>
+              <div>
+                <label>Escala</label>
+                <select value={scaleType} onChange={(e) => setScaleType(e.target.value)}>
+                  {Object.entries(SCALES).map(([k, s]) => <option key={k} value={k}>{s.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label>Octava base</label>
+                <input type="number" min="2" max="6" value={scaleOctave} onChange={(e) => setScaleOctave(Math.max(2, Math.min(6, Math.round(num(e.target.value)))))} />
+              </div>
+            </div>
+            <button className="primary" onClick={applyScale}>Generar escala ({SCALES[scaleType].intervals.length} anillos, modo Nota musical)</button>
+            <div className="tip">Reemplaza todos los anillos por la escala elegida, en modo "Nota musical" — el rpm los reajusta automáticamente y podrás usar "Buscar mejor rpm" arriba para minimizar el error.</div>
+          </div>
+
+          <div className="panel">
             <h2>Anillos ({rings.length})</h2>
+            <label className="check"><input type="checkbox" checked={bulkDuty} onChange={(e) => setBulkDuty(e.target.checked)} /> Ciclo de trabajo (duty) para todos los anillos a la vez</label>
+            {bulkDuty && (
+              <div className="row" style={{ marginTop: 6, marginBottom: 10 }}>
+                <div style={{ flex: 2 }}>
+                  <label>Duty para todos: <b className="mono">{rings[0]?.duty ?? 50}%</b></label>
+                  <input type="range" min="10" max="90" value={rings[0]?.duty ?? 50} onChange={(e) => setAllDuty(num(e.target.value))} />
+                </div>
+              </div>
+            )}
             {rows.map((r) => (
               <div key={r.id} className={`ring ${r.warns.length ? "bad" : ""}`}>
                 <div className="ringhead">
@@ -325,8 +412,8 @@ export default function App() {
                 </div>
                 <div className="row">
                   <div style={{ flex: 2 }}>
-                    <label>Duty: <b className="mono">{r.duty}%</b>{r.shape === "circle" && <span style={{ color: "var(--amber)" }}> — los círculos no mantienen el duty exacto</span>}</label>
-                    <input type="range" min="10" max="90" value={r.duty} onChange={(e) => upRing(r.id, { duty: num(e.target.value) })} />
+                    <label>Duty: <b className="mono">{r.duty}%</b>{r.shape === "circle" && <span style={{ color: "var(--amber)" }}> — los círculos no mantienen el duty exacto</span>}{bulkDuty && <span style={{ color: "var(--dim)" }}> — controlado arriba (todos a la vez)</span>}</label>
+                    <input type="range" min="10" max="90" value={r.duty} disabled={bulkDuty} onChange={(e) => upRing(r.id, { duty: num(e.target.value) })} />
                   </div>
                   {!disc.autoLayout && (
                     <>
@@ -393,7 +480,7 @@ export default function App() {
               <button onClick={resetDefaults}>Restablecer valores de fábrica</button>
             </div>
             <div className="tip">
-              Los archivos exportados nunca incluyen etiquetas. El SVG usa unidades físicas en mm (viewBox 1:1) con trazo de 0,1 mm en modo láser — impórtalo directo en LightBurn/RDWorks, o conviértelo a DXF R14 desde Inkscape si tu máquina lo pide. Para papel, imprime el PNG/PDF al 100 % sin escalar.
+              Los archivos exportados nunca incluyen etiquetas. El SVG usa unidades físicas en mm (viewBox 1:1) con trazo de 0,1 mm en modo láser — impórtalo directo en LightBurn/RDWorks, o conviértelo a DXF R14 desde Inkscape si tu máquina lo pide. El PNG y el PDF incluyen una regla de calibración de 10 cm debajo del disco: mídela con una regla física después de imprimir — si no da exactamente 100 mm, tu impresor está escalando la página; desactiva "ajustar a página" y vuelve a imprimir al 100 %.
             </div>
           </div>
         </div>
